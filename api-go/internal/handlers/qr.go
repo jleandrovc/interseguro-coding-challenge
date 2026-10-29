@@ -1,0 +1,120 @@
+package handlers
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+        "log"
+	"github.com/gofiber/fiber/v2"
+	"gonum.org/v1/gonum/mat"
+	"interseguro/api-go/internal/services"
+)
+
+type QRHandler struct {
+	statistics *services.StatisticsClient
+}
+
+func NewQRHandler(client *services.StatisticsClient) *QRHandler {
+	return &QRHandler{statistics: client}
+}
+
+type request struct {
+	Matrix [][]float64 `json:"matrix"`
+}
+
+type response struct {
+	Q          [][]float64            `json:"q"`
+	R          [][]float64            `json:"r"`
+	Statistics services.Statistics    `json:"statistics"`
+}
+
+func (h *QRHandler) Handle(c *fiber.Ctx) error {
+	var req request
+	if err := json.Unmarshal(c.Body(), &req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "body must be valid JSON")
+	}
+	if err := validateMatrix(req.Matrix); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+
+	q, r, err := factorize(req.Matrix)
+	if err != nil {
+		return fiber.NewError(fiber.StatusUnprocessableEntity, err.Error())
+	}
+
+	stats, err := h.statistics.Calculate(q, r)
+if err != nil {
+    log.Printf("ERROR statistics service: %v", err)
+    return fiber.NewError(fiber.StatusBadGateway, "statistics service unavailable")
+}
+	return c.JSON(response{Q: q, R: r, Statistics: stats})
+}
+
+func validateMatrix(matrix [][]float64) error {
+	if len(matrix) == 0 {
+		return errors.New("matrix must contain at least one row")
+	}
+	cols := len(matrix[0])
+	if cols == 0 {
+		return errors.New("matrix must contain at least one column")
+	}
+	if len(matrix) < cols {
+		return errors.New("matrix must have rows >= columns (m >= n)")
+	}
+	if len(matrix) > 500 || cols > 100 {
+		return errors.New("matrix dimensions exceed the configured limit")
+	}
+	for i, row := range matrix {
+		if len(row) != cols {
+			return fmt.Errorf("matrix must be rectangular: row %d has %d columns, expected %d", i, len(row), cols)
+		}
+		for j, value := range row {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return fmt.Errorf("matrix[%d][%d] must be a finite number", i, j)
+			}
+		}
+	}
+	return nil
+}
+
+func factorize(values [][]float64) ([][]float64, [][]float64, error) {
+	rows, cols := len(values), len(values[0])
+	flat := make([]float64, 0, rows*cols)
+	for _, row := range values {
+		flat = append(flat, row...)
+	}
+	a := mat.NewDense(rows, cols, flat)
+	var qr mat.QR
+	qr.Factorize(a)
+
+	// Reduced QR: Q is m×n and R is n×n.
+	var qFull, rFull mat.Dense
+	qr.QTo(&qFull)
+	qr.RTo(&rFull)
+	qReduced := mat.NewDense(rows, cols, nil)
+	for i := 0; i < rows; i++ {
+		for j := 0; j < cols; j++ {
+			qReduced.Set(i, j, qFull.At(i, j))
+		}
+	}
+	rReduced := mat.NewDense(cols, cols, nil)
+	for i := 0; i < cols; i++ {
+		for j := 0; j < cols; j++ {
+			rReduced.Set(i, j, rFull.At(i, j))
+		}
+	}
+	return denseToSlices(qReduced), denseToSlices(rReduced), nil
+}
+
+func denseToSlices(matrix mat.Matrix) [][]float64 {
+	rows, cols := matrix.Dims()
+	result := make([][]float64, rows)
+	for i := 0; i < rows; i++ {
+		result[i] = make([]float64, cols)
+		for j := 0; j < cols; j++ {
+			result[i][j] = matrix.At(i, j)
+		}
+	}
+	return result
+}

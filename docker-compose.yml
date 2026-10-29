@@ -1,0 +1,32 @@
+services:
+  api-node:
+    build: ./api-node
+    environment:
+      PORT: "3001"
+      DIAGONAL_TOLERANCE: "1e-9"
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api-go:
+    build: ./api-go
+    environment:
+      PORT: "8080"
+      NODE_API_URL: "http://api-node:3001/api/v1/statistics"
+      HTTP_TIMEOUT_SECONDS: "5"
+    ports:
+      - "8080:8080"
+    depends_on:
+      api-node:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api-go
